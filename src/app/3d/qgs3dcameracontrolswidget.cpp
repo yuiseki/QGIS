@@ -32,7 +32,8 @@
 
 using namespace Qt::StringLiterals;
 
-const QgsSettingsEntryBool *Qgs3DCameraControlsWidget::setting3DCameraControlsLiveUpdate = new QgsSettingsEntryBool( u"camera-controls-live-update"_s, QgsSettingsTree::sTree3DMap, true, u"Whether the 3D map is dynamically updated while camera controls are edited"_s );
+const QgsSettingsEntryBool *Qgs3DCameraControlsWidget::setting3DCameraControlsLiveUpdate
+  = new QgsSettingsEntryBool( u"camera-controls-live-update"_s, QgsSettingsTree::sTree3DMap, true, u"Whether the 3D map is dynamically updated while camera controls are edited"_s );
 
 Qgs3DCameraControlsWidget::Qgs3DCameraControlsWidget( Qgs3DMapCanvas *canvas, QWidget *parent )
   : QWidget( parent )
@@ -69,12 +70,7 @@ void Qgs3DCameraControlsWidget::updateCameraLookingAt()
   QgsVector3D worldLookingAt = m3DMapCanvas->mapSettings()->mapToWorldCoordinates( mapLookingAt );
   worldLookingAt.setZ( mCameraZ->value() );
 
-  m3DMapCanvas->cameraController()->setLookingAtPoint(
-    worldLookingAt,
-    m3DMapCanvas->cameraController()->distance(),
-    m3DMapCanvas->cameraController()->pitch(),
-    m3DMapCanvas->cameraController()->yaw()
-  );
+  m3DMapCanvas->cameraController()->setLookingAtPoint( worldLookingAt, m3DMapCanvas->cameraController()->distance(), m3DMapCanvas->cameraController()->pitch(), m3DMapCanvas->cameraController()->yaw() );
 }
 
 void Qgs3DCameraControlsWidget::updateFromCamera() const

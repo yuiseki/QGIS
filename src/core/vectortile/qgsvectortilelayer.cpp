@@ -15,6 +15,14 @@
 
 #include "qgsvectortilelayer.h"
 
+#if __has_include("qgsmaplibreconfig.h")
+#include "qgsmaplibreconfig.h"
+#endif
+
+#ifdef WITH_MAPLIBRE
+#include <QMapLibre/Settings>
+#endif
+
 #include "qgsblockingnetworkrequest.h"
 #include "qgsdatasourceuri.h"
 #include "qgsgeometryengine.h"
@@ -30,6 +38,7 @@
 #include "qgsthreadingutils.h"
 #include "qgsvectortilebasiclabeling.h"
 #include "qgsvectortilebasicrenderer.h"
+#include "qgsmaplibrevectortilerenderer.h"
 #include "qgsvectortiledataprovider.h"
 #include "qgsvectortilelabeling.h"
 #include "qgsvectortilelayerrenderer.h"
@@ -228,6 +237,8 @@ bool QgsVectorTileLayer::readSymbology( const QDomNode &node, QString &errorMess
     QgsVectorTileRenderer *r = nullptr;
     if ( rendererType == "basic"_L1 )
       r = new QgsVectorTileBasicRenderer;
+    else if ( rendererType == "maplibre"_L1 )
+      r = new QgsMapLibreVectorTileRenderer;
     else
     {
       errorMessage = tr( "Unknown renderer type: " ) + rendererType;

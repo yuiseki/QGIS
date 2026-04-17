@@ -130,6 +130,8 @@ class CORE_EXPORT QgsVectorTileRenderer
 
     if ( type == "basic"_L1 )
       sipType = sipType_QgsVectorTileBasicRenderer;
+    else if ( type == "maplibre"_L1 )
+      sipType = sipType_QgsMapLibreVectorTileRenderer;
     else
       sipType = 0;
   SIP_END

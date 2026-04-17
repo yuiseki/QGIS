@@ -34,6 +34,9 @@
 #ifdef WITH_MAPLIBRE
 #include "qgsmaplibremetal_p.h"
 
+#include <QDir>
+#include <QStandardPaths>
+
 #include <QMapLibre/Map>
 #include <QMapLibre/Settings>
 #endif
@@ -127,6 +130,17 @@ void QgsMapLibreVectorTileRenderer::startRender( QgsRenderContext &context, int 
   // called from a QGIS parallel render worker thread.
   QMapLibre::Settings settings;
   settings.setMapMode( QMapLibre::Settings::MapMode::Continuous );
+
+  // Persist tile data across render cycles so pan/zoom to a
+  // previously-visited area doesn't re-fetch tiles over the network.
+  // maplibre keeps the cache in a small SQLite file.
+  const QString cacheDir = QStandardPaths::writableLocation( QStandardPaths::CacheLocation );
+  if ( !cacheDir.isEmpty() )
+  {
+    QDir().mkpath( cacheDir );
+    settings.setCacheDatabasePath( cacheDir + QStringLiteral( "/maplibre-tiles.sqlite" ) );
+    settings.setCacheDatabaseMaximumSize( 256 * 1024 * 1024 );  // 256 MiB
+  }
 
   mPrivate->map = std::make_unique<QMapLibre::Map>(
     nullptr,

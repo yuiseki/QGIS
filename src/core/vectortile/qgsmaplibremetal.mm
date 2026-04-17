@@ -85,9 +85,19 @@ namespace QgsMapLibreMetal
       // maplibre loads tiles asynchronously on its own worker threads. One
       // render() call draws only what's already loaded, which is usually
       // nothing on the first frame. Sleep + pump events + re-render until
-      // tiles have had a chance to arrive. This is intentionally simple
-      // and slow; caching / long-lived Map reuse lands in a follow-up.
-      const int kIterations = 30;
+      // tiles have had a chance to arrive.
+      //
+      // 15 iterations * 100 ms = ~1.5 s budget per render cycle. That is
+      // enough for a disk-cached revisit to a previously-fetched area
+      // (tile open + decode + upload runs well inside a second) while
+      // keeping the worst case from dominating user-perceived latency.
+      // Genuinely cold tiles may render incomplete on the first pan; a
+      // second pan picks them up from the on-disk cache.
+      //
+      // A needsRendering-signal-driven loop was tried and immediately
+      // destabilised the process (rendering blank / shutdown hang), so
+      // the fixed-iteration sleep stays in place for now.
+      const int kIterations = 15;
       const int kSleepMs = 100;
       for ( int i = 0; i < kIterations; ++i )
       {

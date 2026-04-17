@@ -1044,6 +1044,7 @@ set(QGIS_CORE_SRCS
   vectortile/qgsmbtilesvectortiledataprovider.cpp
   vectortile/qgsvectortilebasiclabeling.cpp
   vectortile/qgsvectortilebasicrenderer.cpp
+  vectortile/qgsmaplibrevectortilerenderer.cpp
   vectortile/qgsvectortileconnection.cpp
   vectortile/qgsvectortiledataitems.cpp
   vectortile/qgsvectortiledataprovider.cpp
@@ -2202,6 +2203,7 @@ set(QGIS_CORE_HDRS
   vectortile/qgsmbtilesvectortiledataprovider.h
   vectortile/qgsvectortilebasiclabeling.h
   vectortile/qgsvectortilebasicrenderer.h
+  vectortile/qgsmaplibrevectortilerenderer.h
   vectortile/qgsvectortileconnection.h
   vectortile/qgsvectortiledataitems.h
   vectortile/qgsvectortiledataprovider.h
@@ -2880,6 +2882,43 @@ if (WITH_SFCGAL)
   target_link_libraries(qgis_core
     SFCGAL::SFCGAL
   )
+endif()
+
+# Workaround for clang 21 SROA optimization pass hanging on this file
+# (infinite loop in SSAUpdater::GetValue when recompiling after PCH invalidation).
+# Use -O0 and skip PCH (PCH built with -O2 cannot be used with -O0).
+# Font management is not performance-critical.
+if (APPLE)
+  set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/src/core/textrenderer/qgsfontmanager.cpp
+    PROPERTIES
+      COMPILE_FLAGS "-O0"
+      SKIP_PRECOMPILE_HEADERS ON
+  )
+endif()
+
+if (HAVE_MAPLIBRE)
+  # IMPORTANT: Do NOT use target_include_directories or target_compile_definitions
+  # on qgis_core for maplibre. Any change to the target's compile flags invalidates
+  # the PCH and forces a full recompile of ~1500 files.
+  # Instead, we generate a config header and set includes per-file only.
+  configure_file(
+    ${CMAKE_SOURCE_DIR}/src/core/vectortile/qgsmaplibreconfig.h.in
+    ${CMAKE_BINARY_DIR}/src/core/qgsmaplibreconfig.h
+  )
+  set(_maplibre_srcs
+    ${CMAKE_SOURCE_DIR}/src/core/vectortile/qgsvectortilelayer.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/vectortile/qgsmaplibrevectortilerenderer.cpp
+  )
+  # Get QMapLibre::Core include directories to apply per-file
+  get_target_property(_qmaplibre_core_includes QMapLibre::Core INTERFACE_INCLUDE_DIRECTORIES)
+  foreach(_src ${_maplibre_srcs})
+    set_property(SOURCE ${_src} APPEND PROPERTY INCLUDE_DIRECTORIES
+      ${CMAKE_BINARY_DIR}/src/core
+      ${_qmaplibre_core_includes}
+    )
+  endforeach()
+  target_link_libraries(qgis_core QMapLibre::Core)
 endif()
 
 if (WITH_GEOGRAPHICLIB)

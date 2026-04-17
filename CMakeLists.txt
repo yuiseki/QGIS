@@ -571,6 +571,14 @@ if(WITH_CORE)
     set(HAVE_DRACO TRUE)  # used in qgisconfig.h
   endif()
 
+  set (WITH_MAPLIBRE FALSE CACHE BOOL "Determines whether MapLibre Native vector tile renderer should be built")
+  if (WITH_MAPLIBRE)
+    # Use QMapLibre (maplibre-native-qt) which wraps maplibre-native with proper Qt integration
+    find_package(QMapLibre CONFIG REQUIRED COMPONENTS Core)
+    set(HAVE_MAPLIBRE TRUE)
+    message(STATUS "Found QMapLibre: ${QMapLibre_DIR}")
+  endif()
+
   #############################################################
   # search for Qt
 

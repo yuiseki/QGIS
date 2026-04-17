@@ -27,6 +27,8 @@
 #include <QPen>
 
 #ifdef WITH_MAPLIBRE
+#include "qgsmaplibremetal_p.h"
+
 #include <QMapLibre/Map>
 #include <QMapLibre/Settings>
 #endif
@@ -36,6 +38,7 @@ class QgsMapLibreVectorTileRenderer::Private
   public:
 #ifdef WITH_MAPLIBRE
     std::unique_ptr<QMapLibre::Map> map;
+    void *metalLayer = nullptr;  // opaque CAMetalLayer* on macOS
 #endif
 };
 
@@ -66,6 +69,19 @@ void QgsMapLibreVectorTileRenderer::startRender( QgsRenderContext &context, int 
 #ifdef WITH_MAPLIBRE
   const QSize viewportSize = context.outputSize();
   const qreal pixelRatio = context.devicePixelRatio();
+  const QSize effectiveSize = viewportSize.isEmpty() ? QSize( 512, 512 ) : viewportSize;
+
+  // Allocate an offscreen CAMetalLayer so QMapLibre's Metal backend has
+  // something to render into. QMapLibre takes a non-owning raw pointer to
+  // the layer; we keep ownership and free it in stopRender().
+  const int widthPx = static_cast<int>( effectiveSize.width() * ( pixelRatio > 0 ? pixelRatio : 1.0 ) );
+  const int heightPx = static_cast<int>( effectiveSize.height() * ( pixelRatio > 0 ? pixelRatio : 1.0 ) );
+  mPrivate->metalLayer = QgsMapLibreMetal::createOffscreenLayer( widthPx, heightPx );
+  if ( mPrivate->metalLayer == nullptr )
+  {
+    QgsDebugError( QStringLiteral( "Failed to create offscreen Metal layer (size=%1x%2)" ).arg( widthPx ).arg( heightPx ) );
+    return;
+  }
 
   QMapLibre::Settings settings;
   settings.setMapMode( QMapLibre::Settings::MapMode::Static );
@@ -73,7 +89,7 @@ void QgsMapLibreVectorTileRenderer::startRender( QgsRenderContext &context, int 
   mPrivate->map = std::make_unique<QMapLibre::Map>(
     nullptr,
     settings,
-    viewportSize.isEmpty() ? QSize( 512, 512 ) : viewportSize,
+    effectiveSize,
     pixelRatio > 0 ? pixelRatio : 1.0
   );
 
@@ -82,16 +98,17 @@ void QgsMapLibreVectorTileRenderer::startRender( QgsRenderContext &context, int 
     mPrivate->map->setStyleUrl( mStyleUrl );
   }
 
+  // Phase 4a: just verify the Metal renderer can be attached without crashing.
+  // Actual rendering pipeline (startStaticRender / readback) follows in 4b.
+  mPrivate->map->createRenderer( mPrivate->metalLayer );
+
   QgsDebugMsgLevel(
-    QStringLiteral( "QMapLibre::Map created size=%1x%2 pixelRatio=%3 styleUrl=%4" )
-      .arg( viewportSize.width() ).arg( viewportSize.height() )
-      .arg( pixelRatio ).arg( mStyleUrl ),
+    QStringLiteral( "QMapLibre::Map + Metal renderer attached size=%1x%2 physical=%3x%4 styleUrl=%5" )
+      .arg( effectiveSize.width() ).arg( effectiveSize.height() )
+      .arg( widthPx ).arg( heightPx )
+      .arg( mStyleUrl ),
     1
   );
-
-  // NOTE: createRenderer() requires Metal/Vulkan/GL setup which we don't wire
-  // up yet. Phase 3 only verifies Map construction + style load. Phase 4 will
-  // add the actual renderer and texture integration.
 #else
   Q_UNUSED( context )
 #endif
@@ -104,8 +121,15 @@ void QgsMapLibreVectorTileRenderer::stopRender( QgsRenderContext &context )
 #ifdef WITH_MAPLIBRE
   if ( mPrivate->map )
   {
-    QgsDebugMsgLevel( QStringLiteral( "Destroying QMapLibre::Map" ), 1 );
+    mPrivate->map->destroyRenderer();
     mPrivate->map.reset();
+    QgsDebugMsgLevel( QStringLiteral( "Destroyed QMapLibre::Map + renderer" ), 1 );
+  }
+
+  if ( mPrivate->metalLayer )
+  {
+    QgsMapLibreMetal::destroyLayer( mPrivate->metalLayer );
+    mPrivate->metalLayer = nullptr;
   }
 #endif
 }
@@ -117,7 +141,7 @@ void QgsMapLibreVectorTileRenderer::renderBackground( QgsRenderContext &context 
 
 void QgsMapLibreVectorTileRenderer::renderTile( const QgsVectorTileRendererData &tile, QgsRenderContext &context )
 {
-  // Phase 3: still the skeleton visual marker. Actual rendering comes in Phase 4+.
+  // Phase 4a: visual marker unchanged. Actual pixel transport comes in 4b.
   QPainter *p = context.painter();
   if ( !p )
     return;

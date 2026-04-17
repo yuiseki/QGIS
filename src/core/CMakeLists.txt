@@ -2910,6 +2910,22 @@ if (HAVE_MAPLIBRE)
     ${CMAKE_SOURCE_DIR}/src/core/vectortile/qgsvectortilelayer.cpp
     ${CMAKE_SOURCE_DIR}/src/core/vectortile/qgsmaplibrevectortilerenderer.cpp
   )
+  if (APPLE)
+    list(APPEND _maplibre_srcs ${CMAKE_SOURCE_DIR}/src/core/vectortile/qgsmaplibremetal.mm)
+    target_sources(qgis_core PRIVATE ${CMAKE_SOURCE_DIR}/src/core/vectortile/qgsmaplibremetal.mm)
+    # The main PCH is built without Objective-C, so skip it for .mm files.
+    set_source_files_properties(
+      ${CMAKE_SOURCE_DIR}/src/core/vectortile/qgsmaplibremetal.mm
+      PROPERTIES SKIP_PRECOMPILE_HEADERS ON
+    )
+    # Objective-C++ frameworks for Metal offscreen layer creation
+    target_link_libraries(qgis_core
+      "-framework Metal"
+      "-framework QuartzCore"
+      "-framework AppKit"
+      "-framework CoreFoundation"
+    )
+  endif()
   # Get QMapLibre::Core include directories to apply per-file
   get_target_property(_qmaplibre_core_includes QMapLibre::Core INTERFACE_INCLUDE_DIRECTORIES)
   foreach(_src ${_maplibre_srcs})

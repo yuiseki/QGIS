@@ -19,12 +19,17 @@
 #endif
 
 #include "qgslogger.h"
+#include "qgsmaptopixel.h"
+#include "qgsrectangle.h"
 #include "qgsrendercontext.h"
 #include "qgsvectortilerenderer.h"
 
 #include <QDomElement>
+#include <QImage>
 #include <QPainter>
 #include <QPen>
+
+#include <cmath>
 
 #ifdef WITH_MAPLIBRE
 #include "qgsmaplibremetal_p.h"
@@ -39,6 +44,9 @@ class QgsMapLibreVectorTileRenderer::Private
 #ifdef WITH_MAPLIBRE
     std::unique_ptr<QMapLibre::Map> map;
     void *metalLayer = nullptr;  // opaque CAMetalLayer* on macOS
+    int widthPx = 0;
+    int heightPx = 0;
+    qreal pixelRatio = 1.0;
 #endif
 };
 
@@ -61,6 +69,35 @@ QgsMapLibreVectorTileRenderer *QgsMapLibreVectorTileRenderer::clone() const
   return r;
 }
 
+#ifdef WITH_MAPLIBRE
+namespace
+{
+  // Web Mercator <-> lat/lon helpers. Assumes the QGIS render extent is in
+  // EPSG:3857 (which matches maplibre's only supported CRS).
+  constexpr double MERCATOR_RADIUS = 20037508.342789244;
+
+  double mercatorXToLon( double x )
+  {
+    return x / MERCATOR_RADIUS * 180.0;
+  }
+
+  double mercatorYToLat( double y )
+  {
+    return std::atan( std::sinh( y / MERCATOR_RADIUS * M_PI ) ) * 180.0 / M_PI;
+  }
+
+  // Slippy-map zoom level from metres-per-pixel (at the given latitude).
+  double zoomFromMapUnitsPerPixel( double mupp, double latDeg )
+  {
+    const double metresPerPixelAtEquatorZ0 = 156543.03392804097;
+    const double cosLat = std::cos( latDeg * M_PI / 180.0 );
+    if ( mupp <= 0.0 || cosLat <= 0.0 )
+      return 0.0;
+    return std::log2( metresPerPixelAtEquatorZ0 * cosLat / mupp );
+  }
+}
+#endif // WITH_MAPLIBRE
+
 void QgsMapLibreVectorTileRenderer::startRender( QgsRenderContext &context, int tileZoom, const QgsTileRange &tileRange )
 {
   Q_UNUSED( tileZoom )
@@ -70,12 +107,14 @@ void QgsMapLibreVectorTileRenderer::startRender( QgsRenderContext &context, int 
   const QSize viewportSize = context.outputSize();
   const qreal pixelRatio = context.devicePixelRatio();
   const QSize effectiveSize = viewportSize.isEmpty() ? QSize( 512, 512 ) : viewportSize;
+  const qreal effectivePixelRatio = pixelRatio > 0 ? pixelRatio : 1.0;
 
-  // Allocate an offscreen CAMetalLayer so QMapLibre's Metal backend has
-  // something to render into. QMapLibre takes a non-owning raw pointer to
-  // the layer; we keep ownership and free it in stopRender().
-  const int widthPx = static_cast<int>( effectiveSize.width() * ( pixelRatio > 0 ? pixelRatio : 1.0 ) );
-  const int heightPx = static_cast<int>( effectiveSize.height() * ( pixelRatio > 0 ? pixelRatio : 1.0 ) );
+  const int widthPx = static_cast<int>( effectiveSize.width() * effectivePixelRatio );
+  const int heightPx = static_cast<int>( effectiveSize.height() * effectivePixelRatio );
+
+  mPrivate->widthPx = widthPx;
+  mPrivate->heightPx = heightPx;
+  mPrivate->pixelRatio = effectivePixelRatio;
   mPrivate->metalLayer = QgsMapLibreMetal::createOffscreenLayer( widthPx, heightPx );
   if ( mPrivate->metalLayer == nullptr )
   {
@@ -83,14 +122,17 @@ void QgsMapLibreVectorTileRenderer::startRender( QgsRenderContext &context, int 
     return;
   }
 
+  // Continuous mode: we drive render() explicitly. Static mode's
+  // staticRenderFinished signal was not observed to fire reliably when
+  // called from a QGIS parallel render worker thread.
   QMapLibre::Settings settings;
-  settings.setMapMode( QMapLibre::Settings::MapMode::Static );
+  settings.setMapMode( QMapLibre::Settings::MapMode::Continuous );
 
   mPrivate->map = std::make_unique<QMapLibre::Map>(
     nullptr,
     settings,
     effectiveSize,
-    pixelRatio > 0 ? pixelRatio : 1.0
+    effectivePixelRatio
   );
 
   if ( !mStyleUrl.isEmpty() )
@@ -98,8 +140,6 @@ void QgsMapLibreVectorTileRenderer::startRender( QgsRenderContext &context, int 
     mPrivate->map->setStyleUrl( mStyleUrl );
   }
 
-  // Phase 4a: just verify the Metal renderer can be attached without crashing.
-  // Actual rendering pipeline (startStaticRender / readback) follows in 4b.
   mPrivate->map->createRenderer( mPrivate->metalLayer );
 
   QgsDebugMsgLevel(
@@ -123,7 +163,6 @@ void QgsMapLibreVectorTileRenderer::stopRender( QgsRenderContext &context )
   {
     mPrivate->map->destroyRenderer();
     mPrivate->map.reset();
-    QgsDebugMsgLevel( QStringLiteral( "Destroyed QMapLibre::Map + renderer" ), 1 );
   }
 
   if ( mPrivate->metalLayer )
@@ -136,29 +175,63 @@ void QgsMapLibreVectorTileRenderer::stopRender( QgsRenderContext &context )
 
 void QgsMapLibreVectorTileRenderer::renderBackground( QgsRenderContext &context )
 {
-  Q_UNUSED( context )
-}
+#ifdef WITH_MAPLIBRE
+  if ( !mPrivate->map || !mPrivate->metalLayer )
+    return;
 
-void QgsMapLibreVectorTileRenderer::renderTile( const QgsVectorTileRendererData &tile, QgsRenderContext &context )
-{
-  // Phase 4a: visual marker unchanged. Actual pixel transport comes in 4b.
+  // Map the QGIS viewport centre/scale to maplibre camera (lat/lon + zoom).
+  // This assumes the project is in EPSG:3857; reprojection comes in a later
+  // phase.
+  const QgsRectangle extent = context.extent();
+  const double cx = ( extent.xMinimum() + extent.xMaximum() ) / 2.0;
+  const double cy = ( extent.yMinimum() + extent.yMaximum() ) / 2.0;
+  const double lon = mercatorXToLon( cx );
+  const double lat = mercatorYToLat( cy );
+  const double mupp = context.mapToPixel().mapUnitsPerPixel();
+  const double zoom = zoomFromMapUnitsPerPixel( mupp, lat );
+
+  mPrivate->map->setCoordinateZoom( { lat, lon }, zoom );
+
+  const QImage img = QgsMapLibreMetal::renderOnce(
+    mPrivate->map.get(), mPrivate->metalLayer, mPrivate->widthPx, mPrivate->heightPx
+  );
+  if ( img.isNull() )
+  {
+    QgsDebugError( QStringLiteral( "renderOnce returned null image" ) );
+    return;
+  }
+
+  QgsDebugMsgLevel(
+    QStringLiteral( "renderOnce image: %1x%2 lat=%3 lon=%4 zoom=%5" )
+      .arg( img.width() ).arg( img.height() )
+      .arg( lat ).arg( lon ).arg( zoom ),
+    1
+  );
+
   QPainter *p = context.painter();
   if ( !p )
     return;
 
-  p->save();
-  QPen pen( QColor( 255, 0, 0, 200 ) );
-  pen.setWidth( 2 );
-  p->setPen( pen );
-  p->setBrush( QColor( 255, 0, 0, 20 ) );
-  p->drawPolygon( tile.tilePolygon() );
+  // The QImage is in physical pixels. Tell Qt about the device pixel ratio
+  // so drawImage() scales it down to logical coordinates, which matches
+  // what QGIS's painter expects.
+  QImage scaled = img;
+  scaled.setDevicePixelRatio( mPrivate->pixelRatio );
 
-  const QgsTileXYZ id = tile.id();
-  const QString label = QStringLiteral( "maplibre %1/%2/%3" ).arg( id.zoomLevel() ).arg( id.column() ).arg( id.row() );
-  const QPoint anchor = tile.tilePolygon().boundingRect().center();
-  p->setPen( QColor( 200, 0, 0 ) );
-  p->drawText( anchor, label );
+  p->save();
+  p->drawImage( QPoint( 0, 0 ), scaled );
   p->restore();
+#else
+  Q_UNUSED( context )
+#endif
+}
+
+void QgsMapLibreVectorTileRenderer::renderTile( const QgsVectorTileRendererData &tile, QgsRenderContext &context )
+{
+  // Nothing to do here: the full viewport was already rendered by maplibre
+  // in renderBackground(). QGIS's per-tile callbacks are a no-op for us.
+  Q_UNUSED( tile )
+  Q_UNUSED( context )
 }
 
 void QgsMapLibreVectorTileRenderer::renderSelectedFeatures( const QList<QgsFeature> &selection, QgsRenderContext &context )

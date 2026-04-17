@@ -17,6 +17,13 @@
 
 /// \cond PRIVATE
 
+#include <QImage>
+
+namespace QMapLibre
+{
+  class Map;
+}
+
 //
 // Internal Metal helper used by QgsMapLibreVectorTileRenderer on macOS.
 // Implemented in qgsmaplibremetal.mm (Objective-C++). Only compiled when
@@ -42,6 +49,19 @@ namespace QgsMapLibreMetal
    * Safe to call with nullptr.
    */
   void destroyLayer( void *layer );
+
+  /**
+   * Renders one frame of \a map into \a layer's next drawable, then reads
+   * back the result into a QImage (Format_ARGB32_Premultiplied, which is
+   * memory-compatible with MTLPixelFormatBGRA8Unorm on little-endian).
+   *
+   * This is synchronous: it acquires a drawable, calls
+   * QMapLibre::Map::render(), and performs a GPU->CPU readback before
+   * returning. Intended for use from the QGIS parallel render workers.
+   *
+   * Returns an empty QImage on any failure.
+   */
+  QImage renderOnce( QMapLibre::Map *map, void *layer, int widthPx, int heightPx );
 }
 
 /// \endcond

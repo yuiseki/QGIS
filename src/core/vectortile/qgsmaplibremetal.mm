@@ -15,6 +15,7 @@
 #include "qgsmaplibremetal_p.h"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QObject>
 #include <QThread>
@@ -69,11 +70,21 @@ namespace QgsMapLibreMetal
     if ( map == nullptr || layerPtr == nullptr || widthPx <= 0 || heightPx <= 0 )
       return QImage();
 
+    QElapsedTimer t_total;
+    t_total.start();
+    qint64 t_drawable = 0, t_renders_total = 0, t_native_tex = 0;
+    qint64 t_buffer_alloc = 0, t_blit = 0, t_memcpy = 0;
+    qint64 max_render = 0, min_render = INT64_MAX;
+    int render_count = 0;
+
     @autoreleasepool
     {
       CAMetalLayer *layer = ( __bridge CAMetalLayer * )layerPtr;
 
+      QElapsedTimer t;
+      t.start();
       id<CAMetalDrawable> drawable = [layer nextDrawable];
+      t_drawable = t.elapsed();
       if ( drawable == nil )
       {
         qWarning() << "QgsMapLibreMetal::renderOnce: nextDrawable returned nil";
@@ -97,16 +108,35 @@ namespace QgsMapLibreMetal
       // A needsRendering-signal-driven loop was tried and immediately
       // destabilised the process (rendering blank / shutdown hang), so
       // the fixed-iteration sleep stays in place for now.
-      const int kIterations = 15;
+      // Fixed sleep loop. We tried two shorter alternatives:
+      //   - render-time-based early-exit (~350 ms): dropped terrain
+      //     because render() returns fast even while tiles are still
+      //     being fetched.
+      //   - fixed 800 ms loop: terrain came back but labels rendered
+      //     half-faded - we were catching maplibre's symbol fade-in
+      //     mid-animation (default fade is ~300 ms after tile arrival).
+      // 12 * 100 ms = ~1.2 s gives a tile that arrives at ~800 ms enough
+      // headroom for its labels to finish fading.
+      const int kIterations = 12;
       const int kSleepMs = 100;
       for ( int i = 0; i < kIterations; ++i )
       {
+        QElapsedTimer ti;
+        ti.start();
         map->render();
+        const qint64 elapsed_render = ti.elapsed();
+        t_renders_total += elapsed_render;
+        if ( elapsed_render > max_render ) max_render = elapsed_render;
+        if ( elapsed_render < min_render ) min_render = elapsed_render;
+        ++render_count;
         QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
         QThread::msleep( kSleepMs );
       }
 
+      QElapsedTimer t2;
+      t2.start();
       const void *nativeTex = map->nativeColorTexture();
+      t_native_tex = t2.elapsed();
       id<MTLTexture> tex = ( __bridge id<MTLTexture> )( nativeTex ? nativeTex : ( void * )drawable.texture );
       if ( tex == nil )
         return QImage();
@@ -124,6 +154,8 @@ namespace QgsMapLibreMetal
       // Direct [tex getBytes:...] was observed to hang / never return on
       // CAMetalDrawable textures in Managed storage mode; going via an
       // intermediate MTLBuffer sidesteps that.
+      QElapsedTimer t3;
+      t3.start();
       id<MTLDevice> device = layer.device;
       id<MTLBuffer> readback = [device newBufferWithLength:totalBytes options:MTLResourceStorageModeShared];
       if ( readback == nil )
@@ -131,7 +163,10 @@ namespace QgsMapLibreMetal
         qWarning() << "QgsMapLibreMetal::renderOnce: newBufferWithLength failed";
         return QImage();
       }
+      t_buffer_alloc = t3.elapsed();
 
+      QElapsedTimer t4;
+      t4.start();
       id<MTLCommandQueue> queue = [device newCommandQueue];
       id<MTLCommandBuffer> cmd = [queue commandBuffer];
       id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
@@ -147,11 +182,29 @@ namespace QgsMapLibreMetal
       [blit endEncoding];
       [cmd commit];
       [cmd waitUntilCompleted];
+      t_blit = t4.elapsed();
 
+      QElapsedTimer t5;
+      t5.start();
       memcpy( image.bits(), [readback contents], totalBytes );
+      t_memcpy = t5.elapsed();
 
       Q_UNUSED( widthPx )
       Q_UNUSED( heightPx )
+
+      qDebug().noquote() << QStringLiteral(
+        "renderOnce timing: total=%1 drawable=%2 renders=%3 (count=%4 min=%5 max=%6) "
+        "nativeTex=%7 bufAlloc=%8 blit=%9 memcpy=%10 [ms]" )
+        .arg( t_total.elapsed() )
+        .arg( t_drawable )
+        .arg( t_renders_total )
+        .arg( render_count )
+        .arg( min_render == INT64_MAX ? 0 : min_render )
+        .arg( max_render )
+        .arg( t_native_tex )
+        .arg( t_buffer_alloc )
+        .arg( t_blit )
+        .arg( t_memcpy );
 
       return image;
     }

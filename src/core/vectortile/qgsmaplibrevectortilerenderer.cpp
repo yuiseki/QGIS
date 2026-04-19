@@ -24,7 +24,9 @@
 #include "qgsrendercontext.h"
 #include "qgsvectortilerenderer.h"
 
+#include <QDebug>
 #include <QDomElement>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QPainter>
 #include <QPen>
@@ -118,16 +120,22 @@ void QgsMapLibreVectorTileRenderer::startRender( QgsRenderContext &context, int 
   mPrivate->widthPx = widthPx;
   mPrivate->heightPx = heightPx;
   mPrivate->pixelRatio = effectivePixelRatio;
+
+  QElapsedTimer t_layer;
+  t_layer.start();
   mPrivate->metalLayer = QgsMapLibreMetal::createOffscreenLayer( widthPx, heightPx );
+  const qint64 ms_layer = t_layer.elapsed();
   if ( mPrivate->metalLayer == nullptr )
   {
     QgsDebugError( QStringLiteral( "Failed to create offscreen Metal layer (size=%1x%2)" ).arg( widthPx ).arg( heightPx ) );
     return;
   }
 
-  // Continuous mode: we drive render() explicitly. Static mode's
-  // staticRenderFinished signal was not observed to fire reliably when
-  // called from a QGIS parallel render worker thread.
+  // Continuous mode: we drive render() ourselves. Static mode would have
+  // disabled label fade-in (StaticPlacement) but it does not render at
+  // all when only render() is called - it expects startStaticRender +
+  // staticRenderFinished, which we couldn't get to fire reliably from a
+  // QGIS parallel render worker thread.
   QMapLibre::Settings settings;
   settings.setMapMode( QMapLibre::Settings::MapMode::Continuous );
 
@@ -142,19 +150,36 @@ void QgsMapLibreVectorTileRenderer::startRender( QgsRenderContext &context, int 
     settings.setCacheDatabaseMaximumSize( 256 * 1024 * 1024 );  // 256 MiB
   }
 
+  QElapsedTimer t_map;
+  t_map.start();
   mPrivate->map = std::make_unique<QMapLibre::Map>(
     nullptr,
     settings,
     effectiveSize,
     effectivePixelRatio
   );
+  const qint64 ms_map_ctor = t_map.elapsed();
 
+  QElapsedTimer t_style;
+  t_style.start();
   if ( !mStyleUrl.isEmpty() )
   {
     mPrivate->map->setStyleUrl( mStyleUrl );
   }
+  // Disable maplibre's tile / label fade-in animations. They normally span
+  // 300-500 ms and would otherwise leave readbacks captured mid-fade with
+  // semi-transparent labels and missing terrain.
+  mPrivate->map->setTransitionOptions( 0, 0 );
+  const qint64 ms_style = t_style.elapsed();
 
+  QElapsedTimer t_renderer;
+  t_renderer.start();
   mPrivate->map->createRenderer( mPrivate->metalLayer );
+  const qint64 ms_renderer = t_renderer.elapsed();
+
+  qDebug().noquote() << QStringLiteral(
+    "startRender timing: layer=%1 mapCtor=%2 setStyle=%3 createRenderer=%4 [ms]" )
+    .arg( ms_layer ).arg( ms_map_ctor ).arg( ms_style ).arg( ms_renderer );
 
   QgsDebugMsgLevel(
     QStringLiteral( "QMapLibre::Map + Metal renderer attached size=%1x%2 physical=%3x%4 styleUrl=%5" )
